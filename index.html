@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synthetic Indices Trading Bot</title>
+  <!-- Add the manifest link -->
+  <link rel="manifest" href="/manifest.json">
+  <!-- Theme color for the PWA -->
+  <meta name="theme-color" content="#00bcd4">
+  <!-- Add iOS support -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="/icons/icon-192x192.png">
+  <style>
+    /* (CSS remains unchanged) */
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Synthetic Indices Trading Bot</h2>
+    <div class="stats">
+      <div>Wins: <span id="wins">0</span></div>
+      <div>Losses: <span id="losses">0</span></div>
+      <div>Win Rate: <span id="winRate">0.00%</span></div>
+      <div>Balance: <span id="balance">$0.00</span></div>
+      <div>Stake: <span id="stake">$0.00</span></div>
+      <div>Faux Win Rate: <span id="fauxWinRate">0.00%</span></div>
+    </div>
+    <div>
+      <input id="apiKey" type="text" placeholder="Enter your API Key" />
+      <input id="initialStake" type="number" placeholder="Initial Stake Amount" value="1" step="0.01" />
+      <button id="startBtn">Start Trading</button>
+      <button id="stopBtn">Stop Trading</button>
+    </div>
+    <div id="marketsContainer" class="market-stats"></div>
+    <div class="log" id="log"></div>
+  </div>
+  <script>
+    class TechnicalAnalysis {
+      // (TechnicalAnalysis class remains unchanged)
+    }
+
+    class SyntheticIndicesBot {
+      constructor() {
+        // (Constructor remains unchanged)
+      }
+
+      log(message, type = 'info') {
+        // (Log method remains unchanged)
+      }
+
+      updateStats() {
+        try {
+          const winRate = this.totalTrades > 0 ? ((this.winCount / this.totalTrades) * 100).toFixed(2) : "0.00";
+          document.getElementById("wins").textContent = this.winCount;
+          document.getElementById("losses").textContent = this.lossCount;
+          document.getElementById("winRate").textContent = `${winRate}%`;
+          document.getElementById("balance").textContent = `$${this.accountBalance.toFixed(2)}`;
+          document.getElementById("stake").textContent = `$${this.currentStake.toFixed(2)}`;
+          const fauxWinRate = this.calculateOverallFauxWinRate();
+          document.getElementById("fauxWinRate").textContent = `${fauxWinRate.toFixed(2)}%`;
+        } catch (error) {
+          this.log(`Error updating stats: ${error.message}`, 'loss');
+        }
+      }
+
+      startBot() {
+        if (this.isRunning) return;
+        const apiKey = document.getElementById("apiKey").value;
+        if (!apiKey) {
+          this.log("Please enter an API key", "loss");
+          return;
+        }
+        this.initialStake = parseFloat(document.getElementById("initialStake").value) || 1;
+        if (this.initialStake <= 0) {
+          this.log("Initial stake must be greater than 0", "loss");
+          return;
+        }
+        this.currentStake = this.roundStake(this.initialStake); // Ensure initial stake has 2 decimals
+        this.isRunning = true;
+
+        try {
+          this.ws = new WebSocket("wss://ws.binaryws.com/websockets/v3?app_id=1089");
+          this.ws.onopen = () => {
+            this.log("Connected to Deriv");
+            this.ws.send(JSON.stringify({ authorize: apiKey }));
+          };
+          this.ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.error) {
+              this.log(`Error: ${data.error.message}`, 'loss');
+              this.stopBot();
+              return;
+            }
+            switch (data.msg_type) {
+              case "authorize":
+                this.log("Authorization successful");
+                this.accountBalance = data.authorize.balance;
+                this.updateStats();
+                this.markets.forEach(market => {
+                  this.ws.send(JSON.stringify({
+                    ticks: market,
+                    subscribe: 1
+                  }));
+                });
+                break;
+              case "tick":
+                this.processTick(data.tick);
+                break;
+              case "proposal":
+                this.handleProposal(data);
+                break;
+              case "buy":
+                if (data.buy) {
+                  this.log(`Trade executed: ${data.buy.longcode}`);
+                  this.monitorTrade(data.buy.contract_id, data.buy.buy_price);
+                }
+                break;
+              case "proposal_open_contract":
+                if (data.proposal_open_contract.is_sold) {
+                  const contractId = data.proposal_open_contract.contract_id;
+                  const profit = data.proposal_open_contract.profit;
+                  const stake = data.proposal_open_contract.buy_price;
+                  this.handleTradeOutcome(contractId, profit > 0, stake);
+                }
+                break;
+            }
+          };
+          this.ws.onclose = () => {
+            this.log("Connection closed");
+            this.isRunning = false;
+          };
+        } catch (error) {
+          this.log(`WebSocket connection error: ${error.message}`, "loss");
+          this.isRunning = false;
+        }
+      }
+
+      stopBot() {
+        if (this.ws) {
+          this.ws.close();
+        }
+        this.isRunning = false;
+        this.log("Bot stopped");
+      }
+
+      processTick(tick) {
+        const market = tick.symbol;
+        const price = tick.quote;
+        const now = Date.now();
+        this.analysis[market].updateData(price);
+        this.log(`${market} tick: ${price}`, 'info');
+
+        if (!this.lastTradeTime.get(market)) {
+          this.lastTradeTime.set(market, now - this.analysisWindow - 1000);
+        }
+
+        if (now - this.lastFauxTime.get(market) >= 2000) {
+          const signal = this.analysis[market].analyzeMarket();
+          this.runFauxTrades(market, signal);
+          this.lastFauxTime.set(market, now);
+        }
+
+        if (now - this.lastTradeTime.get(market) >= this.analysisWindow) {
+          this.log(`Analyzing ${market} for potential trade...`);
+          this.executeOptimalTrades();
+          this.lastTradeTime.set(market, now);
+        }
+      }
+
+      runFauxTrades(market, signal) {
+        const trades = this.fauxTrades.get(market) || [];
+        const prices = this.analysis[market].prices;
+
+        if (prices.length < 2) return;
+
+        const currentPrice = prices[prices.length - 1];
+        const previousPrice = prices[prices.length - 2];
+        const priceMove = currentPrice - previousPrice;
+
+        if (!signal || signal === 'NEUTRAL') {
+          signal = this.analysis[market].analyzeMarket();
+        }
+
+        if (signal && signal !== 'NEUTRAL') {
+          const outcome = (signal === 'CALL' && priceMove > 0) || (signal === 'PUT' && priceMove < 0) ? 'win' : 'loss';
+          trades.push(outcome);
+          if (trades.length > 5) trades.shift();
+
+          const fauxWinRate = this.calculateFauxWinRate(market);
+          document.getElementById("fauxWinRate").textContent = `${fauxWinRate.toFixed(2)}%`;
+          this.log(`Faux trade on ${market}: ${outcome.toUpperCase()} (${signal}) - Price move: ${priceMove.toFixed(5)}`, outcome);
+        } else {
+          this.log(`Waiting for valid signal on ${market} - Current move: ${priceMove.toFixed(5)}`);
+        }
+      }
+
+      shouldTrade(market) {
+        const trades = this.fauxTrades.get(market) || [];
+        if (trades.length < 5) {
+          this.log(`Not enough faux trades for ${market} (${trades.length}/5)`);
+          return false;
+        }
+        const wins = trades.filter(t => t === 'win').length;
+        const winRate = (wins / trades.length) * 100;
+        if (winRate >= 80) {
+          this.log(`Trade conditions met for ${market} - Win rate: ${winRate}%`);
+          return true;
+        }
+        this.log(`Insufficient win rate for ${market}: ${winRate}%`);
+        return false;
+      }
+
+      executeTrade(market, action) {
+        this.adjustStake();
+        const stake = this.roundStake(this.currentStake); // Ensure stake has 2 decimals
+        this.ws.send(JSON.stringify({
+          buy: 1,
+          subscribe: 1,
+          price: stake,
+          parameters: {
+            amount: stake,
+            basis: "stake",
+            contract_type: action,
+            currency: "USD",
+            duration: 1,
+            duration_unit: "t",
+            symbol: market
+          }
+        }));
+        this.log(`Executing ${action} trade on ${market} with stake $${stake}`);
+      }
+
+      adjustStake() {
+        try {
+          if (this.accountBalance >= this.initialStake * 5) {
+            this.currentStake = this.roundStake(this.currentStake * 2);
+            this.initialStake = this.accountBalance;
+            this.log(`Account grew 5x! Doubling stake to $${this.currentStake}`);
+          }
+
+          const maxDrawdown = this.initialStake * 0.9;
+          if (this.accountBalance < maxDrawdown) {
+            this.currentStake = this.roundStake(Math.max(this.initialStake * 0.5, 1));
+            this.log(`Trailing stop loss triggered. Reducing stake to $${this.currentStake}`, 'loss');
+            this.initialStake = this.accountBalance;
+          }
+
+          const maxAllowedStake = this.roundStake(this.accountBalance * this.maxStakePercentage);
+          if (this.currentStake > maxAllowedStake) {
+            this.currentStake = maxAllowedStake;
+            this.log(`Stake adjusted to maximum allowed: $${this.currentStake}`);
+          }
+        } catch (error) {
+          this.log(`Error adjusting stake: ${error.message}`, 'loss');
+        }
+      }
+
+      monitorTrade(contractId, entryPrice) {
+        let monitor, timeout;
+        try {
+          let highWaterMark = entryPrice;
+          let trailingStop = entryPrice * 0.95;
+          monitor = setInterval(() => {
+            if (!this.isRunning) {
+              clearInterval(monitor);
+              clearTimeout(timeout);
+              return;
+            }
+            const currentPrice = entryPrice * (1 + (Math.random() - 0.5) * 0.1);
+            if (currentPrice > highWaterMark) {
+              highWaterMark = currentPrice;
+              trailingStop = highWaterMark * 0.95;
+            }
+            if (currentPrice < trailingStop) {
+              clearInterval(monitor);
+              clearTimeout(timeout);
+              this.handleTradeOutcome(contractId, false, entryPrice);
+            }
+          }, 1000);
+          timeout = setTimeout(() => {
+            clearInterval(monitor);
+            const finalPrice = entryPrice * (1 + (Math.random() - 0.5) * 0.1);
+            this.handleTradeOutcome(contractId, finalPrice > entryPrice, entryPrice);
+          }, 10000);
+        } catch (error) {
+          clearInterval(monitor);
+          clearTimeout(timeout);
+          this.log(`Trade monitoring error: ${error.message}`, "loss");
+        }
+      }
+
+      handleTradeOutcome(contractId, isWin, stake) {
+        try {
+          this.totalTrades++;
+          if (isWin) {
+            this.winCount++;
+            this.accountBalance += stake * 0.95;
+            this.log(`Trade ${contractId} WON. Profit: $${(stake * 0.95).toFixed(2)}`, 'win');
+          } else {
+            this.lossCount++;
+            this.accountBalance -= stake;
+            this.log(`Trade ${contractId} LOST. Loss: $${stake.toFixed(2)}`, 'loss');
+          }
+
+          this.consecutiveLosses = isWin ? 0 : this.consecutiveLosses + 1;
+
+          const session = this.lastTradeSession.get('latest') || { wins: 0, total: 0 };
+          session.total++;
+          if (isWin) session.wins++;
+          this.lastTradeSession.set('latest', session);
+
+          const market = this.getCurrentMarket(contractId);
+          if (market) {
+            const trades = this.tradeHistory.get(market) || [];
+            trades.push({
+              timestamp: Date.now(),
+              success: isWin,
+              stake: stake,
+              profit: isWin ? stake * 0.95 : -stake
+            });
+            if (trades.length > 50) trades.shift();
+            this.tradeHistory.set(market, trades);
+          }
+
+          const pricePattern = this.analysis[market]?.prices.slice(-this.pricePatternLength);
+          this.updateMarketLearning(market, isWin, pricePattern);
+
+          this.updateStats();
+          this.adjustTradingParameters();
+          this.adjustStake();
+        } catch (error) {
+          this.log(`Error in handleTradeOutcome: ${error.message}`, 'loss');
+        }
+      }
+
+      requestProposal(market, action) {
+        if (!this.isRunning) return;
+        const stake = Math.min(this.currentStake, this.accountBalance * this.maxStakePercentage);
+        const roundedStake = this.roundStake(stake); // Ensure stake has 2 decimals
+        const proposal = {
+          proposal: 1,
+          amount: roundedStake,
+          basis: "stake",
+          contract_type: action,
+          currency: "USD",
+          duration: 1,
+          duration_unit: "t",
+          symbol: market
+        };
+        this.log(`Sending ${action} proposal for ${market} with stake $${roundedStake}`);
+        this.ws.send(JSON.stringify(proposal));
+      }
+
+      executeOptimalTrades() {
+        try {
+          const marketScores = new Map();
+          let executedTrades = 0;
+          const maxTradesPerCycle = 3;
+
+          for (const market of this.markets) {
+            try {
+              const score = this.calculateMarketScore(market);
+              marketScores.set(market, score);
+              this.log(`${market} final score: ${score.toFixed(2)}`);
+            } catch (error) {
+              this.log(`Error processing ${market}: ${error.message}`, 'loss');
+            }
+          }
+
+          const sortedMarkets = Array.from(marketScores.entries())
+            .sort((a, b) => b[1] - a[1]);
+          this.log(`Top markets selected: ${sortedMarkets.slice(0, 3).map(([m, s]) => `${m}(${s.toFixed(2)})`).join(', ')}`);
+
+          for (const [market, score] of sortedMarkets) {
+            if (executedTrades >= maxTradesPerCycle) break;
+            try {
+              const analysis = this.analysis[market];
+              const signal = analysis.analyzeMarket();
+              const fauxTrades = this.fauxTrades.get(market) || [];
+              const recentFauxTrades = fauxTrades.slice(-5);
+              const fauxWinRate = recentFauxTrades.length > 0 ?
+                (recentFauxTrades.filter(t => t === 'win').length / recentFauxTrades.length) * 100 : 0;
+
+              const shouldTrade = signal &&
+                                signal !== 'NEUTRAL' &&
+                                (fauxWinRate >= 60 || score >= 0.65) &&
+                                this.hasEnoughData(market);
+
+              if (shouldTrade) {
+                const maxStake = this.accountBalance * this.maxStakePercentage;
+                const optimalStake = this.roundStake(Math.min(this.currentStake, maxStake)); // Ensure stake has 2 decimals
+                this.log(`Executing real trade for ${market} - Signal: ${signal}, Score: ${score.toFixed(2)}, Faux Win Rate: ${fauxWinRate.toFixed(2)}%`);
+                const proposal = {
+                  proposal: 1,
+                  amount: optimalStake,
+                  basis: "stake",
+                  contract_type: signal,
+                  currency: "USD",
+                  duration: 1,
+                  duration_unit: "t",
+                  symbol: market
+                };
+                this.ws.send(JSON.stringify(proposal));
+                this.log(`Trade proposal sent for ${market}: ${signal} with stake $${optimalStake}`);
+                executedTrades++;
+              } else {
+                this.log(`No trade executed for ${market} - Signal: ${signal}, Score: ${score.toFixed(2)}, Faux Win Rate: ${fauxWinRate.toFixed(2)}%`);
+              }
+            } catch (error) {
+              this.log(`Error executing trade for ${market}: ${error.message}`, 'loss');
+            }
+          }
+        } catch (error) {
+          this.log(`Error in executeOptimalTrades: ${error.message}`, 'loss');
+        }
+      }
+
+      roundStake(value) {
+        return Math.floor(value * 100) / 100; // Ensure stakes have exactly 2 decimal places
+      }
+
+      calculateOverallFauxWinRate() {
+        try {
+          let totalWins = 0;
+          let totalTrades = 0;
+          for (const market of this.markets) {
+            const trades = this.fauxTrades.get(market) || [];
+            totalWins += trades.filter(t => t === 'win').length;
+            totalTrades += trades.length;
+          }
+          return totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0;
+        } catch (error) {
+          this.log(`Error calculating faux win rate: ${error.message}`, 'loss');
+          return 0;
+        }
+      }
+    }
+
+    const bot = new SyntheticIndicesBot();
+    document.getElementById("startBtn").addEventListener("click", () => {
+      if (!bot.isRunning) {
+        bot.startBot();
+      }
+    });
+    document.getElementById("stopBtn").addEventListener("click", () => {
+      bot.stopBot();
+    });
+  </script>
+</body>
+</html>
